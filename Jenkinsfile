@@ -1,73 +1,152 @@
+// Jenkinsfile - cross-platform (Windows + Linux) with optional image build & remote deploy
 pipeline {
   agent any
+
   environment {
-    DOCKER_HUB_CRED = 'docker-hub-cred'   // set in Jenkins credentials
-    DOCKER_HUB_NAMESPACE = 'aryabhatt05'  // replace with your Docker Hub username/org
+    DOCKER_HUB_CRED = 'docker-hub-cred'      // Docker Hub creds in Jenkins (username + token)
+    DOCKER_HUB_NAMESPACE = 'aryabhatt05'
+    COMPOSE_FILE = 'docker-compose.yml'
+    // Toggle these as build parameters if you want them configurable in Jenkins job
+    DO_BUILD_IMAGES = 'true'                 // "true" to build & push images, "false" to skip
+    DEPLOY_REMOTE = 'false'                  // "true" to copy compose and run on remote host
+    DEPLOY_USER = 'ubuntu'                   // remote deploy user (if DEPLOY_REMOTE=true)
+    DEPLOY_HOST = '1.2.3.4'                  // remote host IP or hostname
   }
+
+  options {
+    timestamps()
+    ansiColor('xterm')
+    // keep last 5 builds
+    buildDiscarder(logRotator(numToKeepStr: '5'))
+  }
+
   stages {
     stage('Checkout') {
       steps {
-        checkout scm
-      }
-    }
-
-    stage('Build & Test - User Service') {
-      steps {
-        dir('user-service') {
-          sh 'mvn -B -DskipTests=false clean package'
-        }
-      }
-    }
-
-    stage('Build & Test - Order Service') {
-      steps {
-        dir('order-service') {
-          sh 'mvn -B -DskipTests=false clean package'
-        }
-      }
-    }
-
-    stage('Docker Build & Push') {
-      steps {
         script {
-          docker.withRegistry('', "${env.DOCKER_HUB_CRED}") {
+          if (env.GIT_CRED && env.GIT_CRED != '') {
+            checkout([$class: 'GitSCM',
+                      branches: [[name: '*/main']],
+                      userRemoteConfigs: [[url: '<git-repo-url>', credentialsId: env.GIT_CRED]]])
+          } else {
+            checkout([$class: 'GitSCM',
+                      branches: [[name: '*/main']],
+                      userRemoteConfigs: [[url: '<git-repo-url>']]])
+          }
+        }
+      }
+    }
+
+    stage('Build & Test') {
+      parallel {
+        stage('Build - user-service') {
+          when { expression { fileExists('user-service/pom.xml') } }
+          steps {
             dir('user-service') {
-              def userImg = docker.build("${env.DOCKER_HUB_NAMESPACE}/user-service:${env.BUILD_NUMBER}")
-              userImg.push()
-              userImg.push('latest')
+              script {
+                if (isUnix()) {
+                  sh 'mvn -B clean package -DskipTests=false'
+                } else {
+                  bat 'mvn -B clean package -DskipTests=false'
+                }
+              }
             }
+          }
+        }
+
+        stage('Build - order-service') {
+          when { expression { fileExists('order-service/pom.xml') } }
+          steps {
             dir('order-service') {
-              def orderImg = docker.build("${env.DOCKER_HUB_NAMESPACE}/order-service:${env.BUILD_NUMBER}")
-              orderImg.push()
-              orderImg.push('latest')
+              script {
+                if (isUnix()) {
+                  sh 'mvn -B clean package -DskipTests=false'
+                } else {
+                  bat 'mvn -B clean package -DskipTests=false'
+                }
+              }
             }
           }
         }
       }
     }
 
-    stage('Deploy with docker-compose (local)') {
+    stage('Docker Build & Push (optional)') {
+      when { expression { return env.DO_BUILD_IMAGES == 'true' } }
       steps {
-        echo "Deploying with docker-compose on Jenkins host"
-        sh '''
-          docker-compose pull
-          docker-compose up -d --remove-orphans
-        '''
-      }
-    }
+        script {
+          docker.withRegistry('', env.DOCKER_HUB_CRED) {
+            if (fileExists('user-service/Dockerfile')) {
+              dir('user-service') {
+                if (isUnix()) {
+                  sh "docker build -t ${DOCKER_HUB_NAMESPACE}/user-service:${BUILD_NUMBER} ."
+                  sh "docker push ${DOCKER_HUB_NAMESPACE}/user-service:${BUILD_NUMBER}"
+                  sh "docker tag ${DOCKER_HUB_NAMESPACE}/user-service:${BUILD_NUMBER} ${DOCKER_HUB_NAMESPACE}/user-service:latest"
+                  sh "docker push ${DOCKER_HUB_NAMESPACE}/user-service:latest"
+                } else {
+                  bat "docker build -t ${DOCKER_HUB_NAMESPACE}/user-service:${BUILD_NUMBER} ."
+                  bat "docker push ${DOCKER_HUB_NAMESPACE}/user-service:${BUILD_NUMBER}"
+                  bat "docker tag ${DOCKER_HUB_NAMESPACE}/user-service:${BUILD_NUMBER} ${DOCKER_HUB_NAMESPACE}/user-service:latest"
+                  bat "docker push ${DOCKER_HUB_NAMESPACE}/user-service:latest"
+                }
+              }
+            }
 
-    // Alternative remote deploy (uncomment to use SSH)
-    /*
-    stage('Deploy to remote host via SSH') {
+            if (fileExists('order-service/Dockerfile')) {
+              dir('order-service') {
+                if (isUnix()) {
+                  sh "docker build -t ${DOCKER_HUB_NAMESPACE}/order-service:${BUILD_NUMBER} ."
+                  sh "docker push ${DOCKER_HUB_NAMESPACE}/order-service:${BUILD_NUMBER}"
+                  sh "docker tag ${DOCKER_HUB_NAMESPACE}/order-service:${BUILD_NUMBER} ${DOCKER_HUB_NAMESPACE}/order-service:latest"
+                  sh "docker push ${DOCKER_HUB_NAMESPACE}/order-service:latest"
+                } else {
+                  bat "docker build -t ${DOCKER_HUB_NAMESPACE}/order-service:${BUILD_NUMBER} ."
+                  bat "docker push ${DOCKER_HUB_NAMESPACE}/order-service:${BUILD_NUMBER}"
+                  bat "docker tag ${DOCKER_HUB_NAMESPACE}/order-service:${BUILD_NUMBER} ${DOCKER_HUB_NAMESPACE}/order-service:latest"
+                  bat "docker push ${DOCKER_HUB_NAMESPACE}/order-service:latest"
+                }
+              }
+            }
+          } // withRegistry
+        } // script
+      } // steps
+    } // stage
+
+    stage('Deploy - Local docker-compose') {
+      when { expression { return env.DEPLOY_REMOTE != 'true' } }
       steps {
-        sshagent (credentials: ['ssh-deploy-cred']) {
-          sh "scp docker-compose.yml user@<target-host>:/home/user/docker-compose.yml"
-          sh "ssh -o StrictHostKeyChecking=no user@<target-host> 'docker-compose -f /home/user/docker-compose.yml pull && docker-compose -f /home/user/docker-compose.yml up -d'"
+        script {
+          if (isUnix()) {
+            sh "docker-compose -f ${COMPOSE_FILE} pull || true"
+            sh "docker-compose -f ${COMPOSE_FILE} up -d --remove-orphans"
+          } else {
+            bat "docker-compose -f ${COMPOSE_FILE} pull || (echo pull-failed)"
+            bat "docker-compose -f ${COMPOSE_FILE} up -d --remove-orphans"
+          }
         }
       }
     }
-    */
-  }
+
+    stage('Deploy - Remote via SSH (optional)') {
+      when { expression { return env.DEPLOY_REMOTE == 'true' } }
+      steps {
+        sshagent (credentials: [env.SSH_DEPLOY_CRED]) {
+          script {
+            def target = "${DEPLOY_USER}@${DEPLOY_HOST}"
+            // copy compose file
+            if (isUnix()) {
+              sh "scp -o StrictHostKeyChecking=no ${COMPOSE_FILE} ${target}:/home/${DEPLOY_USER}/${COMPOSE_FILE}"
+              sh "ssh -o StrictHostKeyChecking=no ${target} 'docker-compose -f /home/${DEPLOY_USER}/${COMPOSE_FILE} pull && docker-compose -f /home/${DEPLOY_USER}/${COMPOSE_FILE} up -d --remove-orphans'"
+            } else {
+              bat "pscp -batch ${COMPOSE_FILE} ${target}:/home/${DEPLOY_USER}/${COMPOSE_FILE}"
+              bat "plink -batch ${target} \"docker-compose -f /home/${DEPLOY_USER}/${COMPOSE_FILE} pull && docker-compose -f /home/${DEPLOY_USER}/${COMPOSE_FILE} up -d --remove-orphans\""
+            }
+          }
+        }
+      }
+    }
+
+  } // stages
 
   post {
     success {
@@ -75,6 +154,16 @@ pipeline {
     }
     failure {
       echo "Pipeline failed: ${env.BUILD_URL}"
+    }
+    always {
+      script {
+        // Non-fatal cleanup
+        if (isUnix()) {
+          sh 'docker image prune -af || true'
+        } else {
+          bat 'docker image prune -af || exit /b 0'
+        }
+      }
     }
   }
 }
