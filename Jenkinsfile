@@ -1,169 +1,176 @@
-// Jenkinsfile - cross-platform (Windows + Linux) with optional image build & remote deploy
 pipeline {
-  agent any
+    agent any
 
-  environment {
-    DOCKER_HUB_CRED = 'docker-hub-cred'      // Docker Hub creds in Jenkins (username + token)
-    DOCKER_HUB_NAMESPACE = 'aryabhatt05'
-    COMPOSE_FILE = 'docker-compose.yml'
-    // Toggle these as build parameters if you want them configurable in Jenkins job
-    DO_BUILD_IMAGES = 'true'                 // "true" to build & push images, "false" to skip
-    DEPLOY_REMOTE = 'false'                  // "true" to copy compose and run on remote host
-    DEPLOY_USER = 'ubuntu'                   // remote deploy user (if DEPLOY_REMOTE=true)
-    DEPLOY_HOST = '1.2.3.4'                  // remote host IP or hostname
-  }
-
-  options {
-    timestamps()
-    ansiColor('xterm')
-    // keep last 5 builds
-    buildDiscarder(logRotator(numToKeepStr: '5'))
-  }
-
-  stages {
-    stage('Checkout') {
-      steps {
-        script {
-          if (env.GIT_CRED && env.GIT_CRED != '') {
-            checkout([$class: 'GitSCM',
-                      branches: [[name: '*/main']],
-                      userRemoteConfigs: [[url: '<git-repo-url>', credentialsId: env.GIT_CRED]]])
-          } else {
-            checkout([$class: 'GitSCM',
-                      branches: [[name: '*/main']],
-                      userRemoteConfigs: [[url: '<git-repo-url>']]])
-          }
-        }
-      }
+    tools {
+        maven 'Maven'
     }
 
-    stage('Build & Test') {
-      parallel {
-        stage('Build - user-service') {
-          when { expression { fileExists('user-service/pom.xml') } }
-          steps {
-            dir('user-service') {
-              script {
-                if (isUnix()) {
-                  sh 'mvn -B clean package -DskipTests=false'
-                } else {
-                  bat 'mvn -B clean package -DskipTests=false'
+    environment {
+        DOCKER_HUB_CREDENTIALS = credentials('docker-hub-credentials')
+        DOCKER_HUB_USERNAME = 'aryabhatt05'
+        USER_SERVICE_IMAGE = "${DOCKER_HUB_USERNAME}/user-service"
+        ORDER_SERVICE_IMAGE = "${DOCKER_HUB_USERNAME}/order-service"
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        PATH = "/usr/local/bin:${env.PATH}"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out source code...'
+                checkout scm
+            }
+        }
+
+        stage('Build UserService') {
+            steps {
+                echo 'Building UserService...'
+                dir('UserService') {
+                    sh 'mvn clean package -DskipTests'
                 }
-              }
             }
-          }
         }
 
-        stage('Build - order-service') {
-          when { expression { fileExists('order-service/pom.xml') } }
-          steps {
-            dir('order-service') {
-              script {
-                if (isUnix()) {
-                  sh 'mvn -B clean package -DskipTests=false'
-                } else {
-                  bat 'mvn -B clean package -DskipTests=false'
+        stage('Build OrderService') {
+            steps {
+                echo 'Building OrderService...'
+                dir('OrderService') {
+                    sh 'mvn clean package -DskipTests'
                 }
-              }
             }
-          }
         }
-      }
-    }
 
-    stage('Docker Build & Push (optional)') {
-      when { expression { return env.DO_BUILD_IMAGES == 'true' } }
-      steps {
-        script {
-          docker.withRegistry('', env.DOCKER_HUB_CRED) {
-            if (fileExists('user-service/Dockerfile')) {
-              dir('user-service') {
-                if (isUnix()) {
-                  sh "docker build -t ${DOCKER_HUB_NAMESPACE}/user-service:${BUILD_NUMBER} ."
-                  sh "docker push ${DOCKER_HUB_NAMESPACE}/user-service:${BUILD_NUMBER}"
-                  sh "docker tag ${DOCKER_HUB_NAMESPACE}/user-service:${BUILD_NUMBER} ${DOCKER_HUB_NAMESPACE}/user-service:latest"
-                  sh "docker push ${DOCKER_HUB_NAMESPACE}/user-service:latest"
-                } else {
-                  bat "docker build -t ${DOCKER_HUB_NAMESPACE}/user-service:${BUILD_NUMBER} ."
-                  bat "docker push ${DOCKER_HUB_NAMESPACE}/user-service:${BUILD_NUMBER}"
-                  bat "docker tag ${DOCKER_HUB_NAMESPACE}/user-service:${BUILD_NUMBER} ${DOCKER_HUB_NAMESPACE}/user-service:latest"
-                  bat "docker push ${DOCKER_HUB_NAMESPACE}/user-service:latest"
+        stage('Test UserService') {
+            steps {
+                echo 'Testing UserService...'
+                dir('UserService') {
+                    sh 'mvn test'
                 }
-              }
             }
+        }
 
-            if (fileExists('order-service/Dockerfile')) {
-              dir('order-service') {
-                if (isUnix()) {
-                  sh "docker build -t ${DOCKER_HUB_NAMESPACE}/order-service:${BUILD_NUMBER} ."
-                  sh "docker push ${DOCKER_HUB_NAMESPACE}/order-service:${BUILD_NUMBER}"
-                  sh "docker tag ${DOCKER_HUB_NAMESPACE}/order-service:${BUILD_NUMBER} ${DOCKER_HUB_NAMESPACE}/order-service:latest"
-                  sh "docker push ${DOCKER_HUB_NAMESPACE}/order-service:latest"
-                } else {
-                  bat "docker build -t ${DOCKER_HUB_NAMESPACE}/order-service:${BUILD_NUMBER} ."
-                  bat "docker push ${DOCKER_HUB_NAMESPACE}/order-service:${BUILD_NUMBER}"
-                  bat "docker tag ${DOCKER_HUB_NAMESPACE}/order-service:${BUILD_NUMBER} ${DOCKER_HUB_NAMESPACE}/order-service:latest"
-                  bat "docker push ${DOCKER_HUB_NAMESPACE}/order-service:latest"
+        stage('Test OrderService') {
+            steps {
+                echo 'Testing OrderService...'
+                dir('OrderService') {
+                    sh 'mvn test'
                 }
-              }
             }
-          } // withRegistry
-        } // script
-      } // steps
-    } // stage
-
-    stage('Deploy - Local docker-compose') {
-      when { expression { return env.DEPLOY_REMOTE != 'true' } }
-      steps {
-        script {
-          if (isUnix()) {
-            sh "docker-compose -f ${COMPOSE_FILE} pull || true"
-            sh "docker-compose -f ${COMPOSE_FILE} up -d --remove-orphans"
-          } else {
-            bat "docker-compose -f ${COMPOSE_FILE} pull || (echo pull-failed)"
-            bat "docker-compose -f ${COMPOSE_FILE} up -d --remove-orphans"
-          }
         }
-      }
-    }
 
-    stage('Deploy - Remote via SSH (optional)') {
-      when { expression { return env.DEPLOY_REMOTE == 'true' } }
-      steps {
-        sshagent (credentials: [env.SSH_DEPLOY_CRED]) {
-          script {
-            def target = "${DEPLOY_USER}@${DEPLOY_HOST}"
-            // copy compose file
-            if (isUnix()) {
-              sh "scp -o StrictHostKeyChecking=no ${COMPOSE_FILE} ${target}:/home/${DEPLOY_USER}/${COMPOSE_FILE}"
-              sh "ssh -o StrictHostKeyChecking=no ${target} 'docker-compose -f /home/${DEPLOY_USER}/${COMPOSE_FILE} pull && docker-compose -f /home/${DEPLOY_USER}/${COMPOSE_FILE} up -d --remove-orphans'"
-            } else {
-              bat "pscp -batch ${COMPOSE_FILE} ${target}:/home/${DEPLOY_USER}/${COMPOSE_FILE}"
-              bat "plink -batch ${target} \"docker-compose -f /home/${DEPLOY_USER}/${COMPOSE_FILE} pull && docker-compose -f /home/${DEPLOY_USER}/${COMPOSE_FILE} up -d --remove-orphans\""
+        stage('Build Docker Images') {
+            parallel {
+                stage('Build UserService Image') {
+                    steps {
+                        echo 'Building UserService Docker image...'
+                        dir('UserService') {
+                            sh """
+                                docker build -t ${USER_SERVICE_IMAGE}:${IMAGE_TAG} .
+                                docker tag ${USER_SERVICE_IMAGE}:${IMAGE_TAG} ${USER_SERVICE_IMAGE}:latest
+                            """
+                        }
+                    }
+                }
+                stage('Build OrderService Image') {
+                    steps {
+                        echo 'Building OrderService Docker image...'
+                        dir('OrderService') {
+                            sh """
+                                docker build -t ${ORDER_SERVICE_IMAGE}:${IMAGE_TAG} .
+                                docker tag ${ORDER_SERVICE_IMAGE}:${IMAGE_TAG} ${ORDER_SERVICE_IMAGE}:latest
+                            """
+                        }
+                    }
+                }
             }
-          }
         }
-      }
+
+        stage('Push to Docker Hub') {
+            steps {
+                echo 'Logging into Docker Hub...'
+                sh 'echo $DOCKER_HUB_CREDENTIALS_PSW | docker login -u $DOCKER_HUB_CREDENTIALS_USR --password-stdin'
+
+                echo 'Pushing UserService image...'
+                sh """
+                    docker push ${USER_SERVICE_IMAGE}:${IMAGE_TAG}
+                    docker push ${USER_SERVICE_IMAGE}:latest
+                """
+
+                echo 'Pushing OrderService image...'
+                sh """
+                    docker push ${ORDER_SERVICE_IMAGE}:${IMAGE_TAG}
+                    docker push ${ORDER_SERVICE_IMAGE}:latest
+                """
+            }
+        }
+
+        stage('Deploy Services') {
+            steps {
+                echo 'Deploying services...'
+                sh '''
+                    # Stop and remove existing containers
+                    docker stop user-service order-service || true
+                    docker rm user-service order-service || true
+
+                    # Create network if not exists
+                    docker network create microservices-network || true
+
+                    # Deploy UserService
+                    docker run -d \
+                        --name user-service \
+                        --network microservices-network \
+                        -p 8081:8081 \
+                        ${USER_SERVICE_IMAGE}:${IMAGE_TAG}
+
+                    # Wait for UserService to be healthy
+                    sleep 10
+
+                    # Deploy OrderService
+                    docker run -d \
+                        --name order-service \
+                        --network microservices-network \
+                        -p 8082:8082 \
+                        -e USERSERVICE_URL=http://user-service:8081 \
+                        ${ORDER_SERVICE_IMAGE}:${IMAGE_TAG}
+                '''
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                echo 'Verifying deployment...'
+                sh '''
+                    # Wait for services to start
+                    sleep 15
+
+                    # Check UserService health
+                    echo "Checking UserService health..."
+                    curl -f http://localhost:8081/api/users/health || exit 1
+
+                    # Check OrderService health
+                    echo "Checking OrderService health..."
+                    curl -f http://localhost:8082/api/orders/health || exit 1
+
+                    echo "All services are healthy!"
+                '''
+            }
+        }
     }
 
-  } // stages
-
-  post {
-    success {
-      echo "Pipeline succeeded: ${env.BUILD_URL}"
-    }
-    failure {
-      echo "Pipeline failed: ${env.BUILD_URL}"
-    }
-    always {
-      script {
-        // Non-fatal cleanup
-        if (isUnix()) {
-          sh 'docker image prune -af || true'
-        } else {
-          bat 'docker image prune -af || exit /b 0'
+    post {
+        always {
+            echo 'Cleaning up...'
+            sh 'docker logout'
         }
-      }
+        success {
+            echo 'Pipeline completed successfully!'
+        }
+        failure {
+            echo 'Pipeline failed!'
+            sh '''
+                docker logs user-service || true
+                docker logs order-service || true
+            '''
+        }
     }
-  }
 }
