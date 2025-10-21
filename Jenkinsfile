@@ -5,14 +5,14 @@ pipeline {
         maven 'Maven'
     }
 
-environment {
-    DOCKER_HUB_CREDENTIALS = credentials('docker-hub-cred')
-    DOCKER_HUB_USERNAME = 'aryabhatt05'
-    USER_SERVICE_IMAGE = "${DOCKER_HUB_USERNAME}/user-serice"
-    ORDER_SERVICE_IMAGE = "${DOCKER_HUB_USERNAME}/order-service"
-    IMAGE_TAG = "${BUILD_NUMBER}"
-}
-
+    environment {
+        DOCKER_HUB_CREDENTIALS = credentials('docker-hub-cred')
+        DOCKER_HUB_USERNAME = 'aryabhatt05'
+        USER_SERVICE_IMAGE = "${DOCKER_HUB_USERNAME}/user-service"
+        ORDER_SERVICE_IMAGE = "${DOCKER_HUB_USERNAME}/order-service"
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        PATH = "C:\\Program Files\\Docker\\Docker\\resources\\bin;${env.PATH}"
+    }
 
     stages {
         stage('Checkout') {
@@ -24,8 +24,8 @@ environment {
 
         stage('Build UserService') {
             steps {
-                echo 'Building UserService...'
-                dir('UserService') {
+                echo 'Building user-service...'
+                dir('user-service') {
                     bat 'mvn clean package -DskipTests'
                 }
             }
@@ -33,40 +33,61 @@ environment {
 
         stage('Build OrderService') {
             steps {
-                echo 'Building OrderService...'
-                dir('OrderService') {
+                echo 'Building order-service...'
+                dir('order-service') {
                     bat 'mvn clean package -DskipTests'
                 }
             }
         }
 
-        stage('Test Services') {
+        stage('Test UserService') {
             steps {
-                echo 'Running tests...'
-                dir('UserService') {
+                echo 'Running tests for user-service...'
+                dir('user-service') {
                     bat 'mvn test'
                 }
-                dir('OrderService') {
+            }
+        }
+
+        stage('Test OrderService') {
+            steps {
+                echo 'Running tests for order-service...'
+                dir('order-service') {
                     bat 'mvn test'
                 }
             }
         }
 
         stage('Build Docker Images') {
-            steps {
-                echo 'Building Docker images...'
-                bat """
-                    docker build -t ${USER_SERVICE_IMAGE}:${IMAGE_TAG} ./UserService
-                    docker build -t ${ORDER_SERVICE_IMAGE}:${IMAGE_TAG} ./OrderService
-                    docker tag ${USER_SERVICE_IMAGE}:${IMAGE_TAG} ${USER_SERVICE_IMAGE}:latest
-                    docker tag ${ORDER_SERVICE_IMAGE}:${IMAGE_TAG} ${ORDER_SERVICE_IMAGE}:latest
-                """
+            parallel {
+                stage('Build user-service Image') {
+                    steps {
+                        echo 'Building Docker image for user-service...'
+                        dir('user-service') {
+                            bat """
+                                docker build -t ${USER_SERVICE_IMAGE}:${IMAGE_TAG} .
+                                docker tag ${USER_SERVICE_IMAGE}:${IMAGE_TAG} ${USER_SERVICE_IMAGE}:latest
+                            """
+                        }
+                    }
+                }
+                stage('Build order-service Image') {
+                    steps {
+                        echo 'Building Docker image for order-service...'
+                        dir('order-service') {
+                            bat """
+                                docker build -t ${ORDER_SERVICE_IMAGE}:${IMAGE_TAG} .
+                                docker tag ${ORDER_SERVICE_IMAGE}:${IMAGE_TAG} ${ORDER_SERVICE_IMAGE}:latest
+                            """
+                        }
+                    }
+                }
             }
         }
 
         stage('Push to Docker Hub') {
             steps {
-                echo 'Logging into Docker Hub...'
+                echo 'Logging in and pushing Docker images to Docker Hub...'
                 bat """
                     echo ${DOCKER_HUB_CREDENTIALS_PSW} | docker login -u ${DOCKER_HUB_CREDENTIALS_USR} --password-stdin
                     docker push ${USER_SERVICE_IMAGE}:${IMAGE_TAG}
@@ -79,7 +100,7 @@ environment {
 
         stage('Deploy Containers') {
             steps {
-                echo 'Deploying containers...'
+                echo 'Deploying microservices containers...'
                 bat """
                     docker stop user-service order-service || exit 0
                     docker rm user-service order-service || exit 0
@@ -87,6 +108,7 @@ environment {
 
                     docker run -d --name user-service --network microservices-network -p 8081:8081 ${USER_SERVICE_IMAGE}:${IMAGE_TAG}
                     timeout /t 10
+
                     docker run -d --name order-service --network microservices-network -p 8082:8082 -e USERSERVICE_URL=http://user-service:8081 ${ORDER_SERVICE_IMAGE}:${IMAGE_TAG}
                 """
             }
@@ -94,7 +116,7 @@ environment {
 
         stage('Verify Deployment') {
             steps {
-                echo 'Verifying deployment...'
+                echo 'Verifying deployed microservices...'
                 bat """
                     timeout /t 15
                     curl -f http://localhost:8081/api/users/health
@@ -106,20 +128,16 @@ environment {
 
     post {
         always {
-            script {
-                echo 'Pipeline finished - attempting docker logout'
-                bat 'docker logout'
-            }
+            echo 'Cleaning up Docker session...'
+            bat 'docker logout'
         }
         success {
-            echo '✅ Pipeline completed successfully!'
+            echo '✅ Pipeline completed successfully! Microservices deployed.'
         }
         failure {
-            script {
-                echo '❌ Pipeline failed - printing container logs (if any)'
-                bat 'docker logs user-service || exit 0'
-                bat 'docker logs order-service || exit 0'
-            }
+            echo '❌ Pipeline failed. Fetching container logs...'
+            bat 'docker logs user-service || exit 0'
+            bat 'docker logs order-service || exit 0'
         }
     }
 }
